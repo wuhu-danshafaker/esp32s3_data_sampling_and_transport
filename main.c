@@ -108,6 +108,9 @@ static int s_retry_num = 0;
 static int sock;
 static int udp_sock;
 
+static struct sockaddr_in udp_remote_addr;
+// static char *ip_server;
+
 // one shot adc
 uint32_t packetCounter;
 static adc_oneshot_unit_handle_t adc1_handle;
@@ -468,27 +471,6 @@ static void adc_task(void *pvParameters){
             pucMessage->data_len = ret_num;
             // ESP_LOGI(TAG, "ret_num: %lu", ret_num);
             xQueueSend(xqueue_estimate, (void*) &pucMessage, (TickType_t) 0);
-            // 多帧打包
-            // if (packNum == 0){
-            //     // 打入数据帧帧头 0x5A55
-            //     memcpy(pucMessage->uc_data, xheader.header, 2);
-            //     // ESP_LOGI(TAG, "it's %u and %u", xheader.header[0], xheader.header[1]);
-            //     // 这里的数字与帧包装有关！ 打入packet counter 4byte
-            //     memcpy(&(pucMessage->uc_data[2]), packetCounterByte, 4);
-            // }
-            // // 打入数据
-            // memcpy(&(pucMessage->uc_data[6 + packNum*ret_num]), result, ret_num);
-            // if (packNum < 4) {
-            //     packNum++;
-            // } else{
-            //     pucMessage->data_len = ret_num*5 + 6;
-            //     ESP_LOGI(TAG, "packNum: %d", packNum);
-            //     packNum = 0;
-            //     // 数据类型占的字节不同 一个voltage(int) 占4个byte  已改为2byte 服务器端读取时倒序?
-            //     xQueueSend(xqueue_estimate, (void*) &pucMessage, (TickType_t) 0); 
-            //     end = esp_timer_get_time();
-            //     ESP_LOGI(TAG, "time*5: %llu", end-start);
-            // }
         }
         else{
             ESP_LOGE(TAG, "ADC READ ERROR");
@@ -598,7 +580,7 @@ static bool wifiInit(){
     return false;
 }
 
-static bool tcpInit(){
+static bool tcpInit(const char *ip_server){
     sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0){
         ESP_LOGE(TAG, "create socket failed");
@@ -609,7 +591,7 @@ static bool tcpInit(){
     struct sockaddr_in destaddr = {};
     destaddr.sin_family = AF_INET;
     destaddr.sin_port = htons(8080);
-    destaddr.sin_addr.s_addr = inet_addr("192.168.1.100");
+    destaddr.sin_addr.s_addr = inet_addr(ip_server);
 
     socklen_t len = sizeof(struct sockaddr);
     if (connect(sock, (struct sockaddr *)&destaddr, len) < 0){
@@ -649,10 +631,10 @@ static void tcp_client_recv_task(void *pvParameters){
     int len = 0;
     uint8_t recv_buff[512];
     
-    static char *start_record = "CMD: start record";
-    static char *stop_record = "CMD: stop record";
-    static char *pause_record = "CMD: pause record";
-    static char *resume_record = "CMD: resume record";
+    const char *start_record = "CMD: start record";
+    const char *stop_record = "CMD: stop record";
+    const char *pause_record = "CMD: pause record";
+    const char *resume_record = "CMD: resume record";
 
     while (len!=-1){
         len = recv(sock, recv_buff, sizeof(recv_buff), 0);
@@ -722,15 +704,51 @@ esp_err_t create_udp_client(){
         return ESP_FAIL;
     }
 
-    struct sockaddr_in destaddr = {};
-    destaddr.sin_family = AF_INET;
-    destaddr.sin_port = htons(UDP_SERVER_PORT);
-    destaddr.sin_addr.s_addr = inet_addr(UDP_SERVER_IP);
+    udp_remote_addr.sin_family = AF_INET;
+    udp_remote_addr.sin_port = htons(UDP_SERVER_PORT);
+    udp_remote_addr.sin_addr.s_addr = inet_addr(UDP_SERVER_IP);
 
-    char sendBuff[512] = "Here is esp32s3. ip:";
-    int len = sendto(udp_sock, sendBuff, strlen(sendBuff), 0, (struct sockaddr *) &destaddr, sizeof(destaddr));
-    if(len>0){
-        
+    return ESP_OK;
+}
+
+bool isIpValid(char *ipAddr) {
+    char *token;
+    int num;
+    int i = 0;
+    while ((token = strtok_r(ipAddr, ".", &ipAddr))) {
+        i ++;
+        num = atoi(token);
+        if (num < 0 || num > 255 || i > 4)
+            return false;
+    }
+    return i == 4;
+}
+
+char* send_and_recv(){
+    unsigned int socklen = sizeof(udp_remote_addr);
+    char sendBuff[512] = "Here is esp32s3.";
+    const char *recvIp = "IP:";
+    char *ip_server;
+    while(true){
+        int len = sendto(udp_sock, sendBuff, strlen(sendBuff), 0, (struct sockaddr *) &udp_remote_addr, sizeof(udp_remote_addr));
+        if(len>0){
+            ESP_LOGI(TAG, "succeed transfer data to %s:%u\n", inet_ntoa(udp_remote_addr.sin_addr), ntohs(udp_remote_addr.sin_port));
+        } else{
+            ESP_LOGE(TAG, "udp send message failed");
+            close(udp_sock);
+        }
+        // 接收
+        char recvBuff[512];
+        memset(recvBuff, 0x00, sizeof(recvBuff));
+        // recvfrom函数的传入参数与sendto不同，需要socklen的引用
+        int recv_len = recvfrom(udp_sock, recvBuff, sizeof(recvBuff), 0, (struct sockaddr *) &udp_remote_addr, &socklen);
+        if(recv_len > 0 && strncmp(recvBuff, recvIp, strlen(recvIp)) == 0){
+            ESP_LOGI(TAG, "udp recv: %s\n", recvBuff);
+            const char *tmp = recvBuff + strlen(recvIp);
+            ip_server = strcpy(recvBuff, tmp);
+            ESP_LOGI(TAG, "ip server: %s\n", ip_server);
+            return ip_server;
+        }
     }
 }
 
@@ -753,12 +771,17 @@ void app_main(void)
     adc_init();
     witJy901sInit();
 
-    tcpInit();
+    create_udp_client();
+    const char* ip_server = send_and_recv();
+    if(!isIpValid(ip_server)){
+        ESP_LOGE(TAG, "wrong ip!");
+        return;
+    }
+    tcpInit(ip_server);
     
     xTimeHandle = xTimerCreate("adc_freq", pdMS_TO_TICKS(1000/100), pdTRUE, (void *)1, timeCallBackTask);
-    
     xTaskCreate(tcp_client_recv_task, "tcp_client_recv", 4096, NULL, 1, NULL);
-    // xTaskCreate(Usart0_task, "Usart0_task", 4096, NULL, 5, NULL);
+
     // 命令行控制jy901s的方法已被删去，可以去sdk中找到
     // vTaskStartScheduler();
     // wifiClose();  // 不可执行close，否则导致无法连接
