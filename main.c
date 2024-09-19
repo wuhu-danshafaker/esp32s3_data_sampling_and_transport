@@ -575,7 +575,7 @@ static bool wifiInit(){
     return false;
 }
 
-static bool tcpInit(const char *ip_server){
+static bool tcpInit(u32_t ip_int){
     sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0){
         ESP_LOGE(TAG, "create socket failed");
@@ -583,13 +583,12 @@ static bool tcpInit(const char *ip_server){
     }
     ESP_LOGI(TAG, "create socket successfully");
     
-    static struct sockaddr_in destaddr = {};
+    struct sockaddr_in destaddr = {};
     destaddr.sin_family = AF_INET;
     destaddr.sin_port = htons(8080);
-    destaddr.sin_addr.s_addr = inet_addr(ip_server);
+    destaddr.sin_addr.s_addr = ip_int; //修改此addr影响另一个addr，why
     // if (inet_pton(AF_INET, ip_server, &destaddr.sin_addr))
-    ESP_LOGI(TAG, "ip tcp: %s!", ip_server);
-    ESP_LOGI(TAG, "udp addr: %lu!", udp_remote_addr.sin_addr.s_addr);
+    ESP_LOGI(TAG, "udp addr: %lu! %lu", udp_remote_addr.sin_addr.s_addr, );
     ESP_LOGI(TAG, "tcp addr: %lu!", destaddr.sin_addr.s_addr);
     socklen_t len = sizeof(struct sockaddr);
     if (connect(sock, (struct sockaddr *)&destaddr, len) < 0){
@@ -728,7 +727,6 @@ bool isIpValid(const char *ip_server) {
             free(ipAddr);
             return false;
         }
-            
     }
     ESP_LOGI(TAG, "ip valid: %s!", ip_server);
     free(ipAddr);
@@ -759,10 +757,13 @@ char* send_and_recv(){
             const char *tmp = recvBuff + strlen(recvIp);
             ip_server = strcpy(recvBuff, tmp);
             ESP_LOGI(TAG, "ip tmp server: %s\n", tmp);
-            close(udp_sock);
+            
             // ip_server不对，
             if(!isIpValid(ip_server)){
                 ESP_LOGE(TAG, "wrong ip!");
+                return "";
+            } else{
+                close(udp_sock);
                 return ip_server;
             }
         }
@@ -770,130 +771,119 @@ char* send_and_recv(){
     return "";
 }
 
-int
-ip4addr_aton_test(const char *cp, ip4_addr_t *addr)
-{
-  u32_t val;
-  u8_t base;
-  char c;
-  u32_t parts[4];
-  u32_t *pp = parts;
+int my_ip4addr_aton(const char *cp, ip4_addr_t *addr){
+    u32_t val;
+    u8_t base;
+    char c;
+    u32_t parts[4];
+    u32_t *pp = parts;
 
-  c = *cp;
-  for (;;) {
-    /*
-     * Collect number up to ``.''.
-     * Values are specified as for C:
-     * 0x=hex, 0=octal, 1-9=decimal.
-     */
-    if (!lwip_isdigit(c)) {
-        ESP_LOGE(TAG, "digit");
-      return 0;
-    }
-    val = 0;
-    base = 10;
-    if (c == '0') {
-      c = *++cp;
-      if (c == 'x' || c == 'X') {
-        base = 16;
-        c = *++cp;
-      } else {
-        base = 8;
-      }
-    }
+    c = *cp;
     for (;;) {
-      if (lwip_isdigit(c)) {
-        if((base == 8) && ((u32_t)(c - '0') >= 8))
-          break;
-        val = (val * base) + (u32_t)(c - '0');
-        c = *++cp;
-      } else if (base == 16 && lwip_isxdigit(c)) {
-        val = (val << 4) | (u32_t)(c + 10 - (lwip_islower(c) ? 'a' : 'A'));
-        c = *++cp;
-      } else {
-        break;
-      }
+        /*
+        * Collect number up to ``.''.
+        * Values are specified as for C:
+        * 0x=hex, 0=octal, 1-9=decimal.
+        */
+        if (!lwip_isdigit(c)) {
+            return 0;
+        }
+        val = 0;
+        base = 10;
+        if (c == '0') {
+            c = *++cp;
+            if (c == 'x' || c == 'X') {
+                base = 16;
+                c = *++cp;
+            } else {
+                base = 8;
+            }
+        }
+        for (;;) {
+            if (lwip_isdigit(c)) {
+                if((base == 8) && ((u32_t)(c - '0') >= 8))
+                    break;
+                val = (val * base) + (u32_t)(c - '0');
+                c = *++cp;
+            } else if (base == 16 && lwip_isxdigit(c)) {
+                val = (val << 4) | (u32_t)(c + 10 - (lwip_islower(c) ? 'a' : 'A'));
+                c = *++cp;
+            } else {
+                break;
+            }
+        }
+        if (c == '.') {
+            /*
+            * Internet format:
+            *  a.b.c.d
+            *  a.b.c   (with c treated as 16 bits)
+            *  a.b (with b treated as 24 bits)
+            */
+            if (pp >= parts + 3) {
+                ESP_LOGE(TAG, "pp");
+                return 0;
+            }
+            *pp++ = val;
+            c = *++cp;
+        } else {
+            break;
+        }
     }
-    if (c == '.') {
-      /*
-       * Internet format:
-       *  a.b.c.d
-       *  a.b.c   (with c treated as 16 bits)
-       *  a.b (with b treated as 24 bits)
-       */
-      if (pp >= parts + 3) {
-        ESP_LOGE(TAG, "pp");
+    /*
+    * Check for trailing characters.
+    */
+    if (c != '\0' && !lwip_isspace(c)) {
         return 0;
-      }
-      *pp++ = val;
-      c = *++cp;
-    } else {
-      break;
     }
-  }
-  /*
-   * Check for trailing characters.
-   */
-  if (c != '\0' && !lwip_isspace(c)) {
-    ESP_LOGE(TAG, "trailing");
-    return 0;
-  }
-  /*
-   * Concoct the address according to
-   * the number of parts specified.
-   */
-  switch (pp - parts + 1) {
+    /*
+    * Concoct the address according to
+    * the number of parts specified.
+    */
+    switch (pp - parts + 1) {
 
-    case 0:
-        ESP_LOGE(TAG, "nodigit");
-      return 0;       /* initial nondigit */
+        case 0:
+            return 0;       /* initial nondigit */
 
-    case 1:             /* a -- 32 bits */
-      break;
+        case 1:             /* a -- 32 bits */
+            break;
 
-    case 2:             /* a.b -- 8.24 bits */
-      if (val > 0xffffffUL) {
-        ESP_LOGE(TAG, "bit2");
-        return 0;
-      }
-      if (parts[0] > 0xff) {
-        ESP_LOGE(TAG, "bit2");
-        return 0;
-      }
-      val |= parts[0] << 24;
-      break;
+        case 2:             /* a.b -- 8.24 bits */
+            if (val > 0xffffffUL) {
+                return 0;
+            }
+            if (parts[0] > 0xff) {
+                return 0;
+            }
+            val |= parts[0] << 24;
+            break;
 
-    case 3:             /* a.b.c -- 8.8.16 bits */
-      if (val > 0xffff) {
-        ESP_LOGE(TAG, "bit3");
-        return 0;
-      }
-      if ((parts[0] > 0xff) || (parts[1] > 0xff)) {
-        ESP_LOGE(TAG, "bit3");
-        return 0;
-      }
-      val |= (parts[0] << 24) | (parts[1] << 16);
-      break;
+        case 3:             /* a.b.c -- 8.8.16 bits */
+            if (val > 0xffff) {
+                return 0;
+            }
+            if ((parts[0] > 0xff) || (parts[1] > 0xff)) {
+                return 0;
+            }
+            val |= (parts[0] << 24) | (parts[1] << 16);
+            break;
 
-    case 4:             /* a.b.c.d -- 8.8.8.8 bits */
-      if (val > 0xff) {
-        ESP_LOGE(TAG, "bit4");
-        return 0;
-      }
-      if ((parts[0] > 0xff) || (parts[1] > 0xff) || (parts[2] > 0xff)) {
-        ESP_LOGE(TAG, "bit4");
-        return 0;
-      }
-      val |= (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8);
-      break;
-    default:
-      LWIP_ASSERT("unhandled", 0);
-      break;
-  }
-  if (addr) {
-    ip4_addr_set_u32(addr, lwip_htonl(val));
-  }
-  return 1;
+        case 4:             /* a.b.c.d -- 8.8.8.8 bits */
+            if (val > 0xff) {
+                return 0;
+            }
+            if ((parts[0] > 0xff) || (parts[1] > 0xff) || (parts[2] > 0xff)) {
+                return 0;
+            }
+            val |= (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8);
+            break;
+        default:
+            LWIP_ASSERT("unhandled", 0);
+            break;
+    }
+    if (addr) {
+        ip4_addr_set_u32(addr, lwip_htonl(val));
+    }
+    return 1;
 }
 
 void app_main(void)
@@ -918,12 +908,14 @@ void app_main(void)
     create_udp_client();
     const char* ip_server = send_and_recv();
     ip4_addr_t val;
-    int res = ip4addr_aton_test(ip_server, &val);
-    ESP_LOGI(TAG, "res is: %d!", res);
-    // tcpInit("192.168.1.100");
+    if(!my_ip4addr_aton(ip_server, &val)){
+        ESP_LOGE(TAG, "invalid ip");
+    }
+
+    tcpInit(val.addr);
     
-    // xTimeHandle = xTimerCreate("adc_freq", pdMS_TO_TICKS(1000/100), pdTRUE, (void *)1, timeCallBackTask);
-    // xTaskCreate(tcp_client_recv_task, "tcp_client_recv", 4096, NULL, 1, NULL);
+    xTimeHandle = xTimerCreate("adc_freq", pdMS_TO_TICKS(1000/100), pdTRUE, (void *)1, timeCallBackTask);
+    xTaskCreate(tcp_client_recv_task, "tcp_client_recv", 4096, NULL, 1, NULL);
 
     // 命令行控制jy901s的方法已被删去，可以去sdk中找到
     // vTaskStartScheduler();
