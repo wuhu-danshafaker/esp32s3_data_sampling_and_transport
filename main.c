@@ -201,7 +201,6 @@ static int32_t WitIICWrite(uint8_t ucAddr, uint8_t ucReg, uint8_t *p_ucVal, uint
 }
 
 static void doubleToByte(byte *data, double value){
-    // 似乎是更好的方法！
     memcpy(data, &value, sizeof(double));
 }
 
@@ -216,8 +215,6 @@ static void doubleArrayToByte(byte *data, double *src, int src_len){
 static void intToByte(byte *b_value, int value){
     // 注意数组本身是地址，如果采用中间值则传入的数组实质上没有变化
     // 2byte就够了
-    // b_value[0] = (byte) ((value>>24) & 0xFF);
-    // b_value[1] = (byte) ((value>>16) & 0xFF);
     b_value[0] = (byte) ((value>>8) & 0xFF);
     b_value[1] = (byte) (value & 0xFF);
 }
@@ -469,7 +466,6 @@ static void adc_task(void *pvParameters){
 
             memcpy(pucMessage->uc_data, result, ret_num);
             pucMessage->data_len = ret_num;
-            // ESP_LOGI(TAG, "ret_num: %lu", ret_num);
             xQueueSend(xqueue_estimate, (void*) &pucMessage, (TickType_t) 0);
         }
         else{
@@ -483,7 +479,6 @@ static void adc_task(void *pvParameters){
             start = end;
         }
         // ESP_LOGI(TAG, "counter: %lu", packetCounter);
-        // vTaskDelay(1);
     }
 
     adc_oneshot_del_unit(adc1_handle);
@@ -587,12 +582,15 @@ static bool tcpInit(const char *ip_server){
         return 0;
     }
     ESP_LOGI(TAG, "create socket successfully");
-
-    struct sockaddr_in destaddr = {};
+    
+    static struct sockaddr_in destaddr = {};
     destaddr.sin_family = AF_INET;
     destaddr.sin_port = htons(8080);
     destaddr.sin_addr.s_addr = inet_addr(ip_server);
-
+    // if (inet_pton(AF_INET, ip_server, &destaddr.sin_addr))
+    ESP_LOGI(TAG, "ip tcp: %s!", ip_server);
+    ESP_LOGI(TAG, "udp addr: %lu!", udp_remote_addr.sin_addr.s_addr);
+    ESP_LOGI(TAG, "tcp addr: %lu!", destaddr.sin_addr.s_addr);
     socklen_t len = sizeof(struct sockaddr);
     if (connect(sock, (struct sockaddr *)&destaddr, len) < 0){
         ESP_LOGE(TAG, "connect to server failed!");
@@ -658,7 +656,10 @@ static void tcp_client_recv_task(void *pvParameters){
                     vTaskDelete(tcp_send_handle);
                     tcp_send_handle = NULL;
                 }
+
+                // 先处理tasknotify
                 if(adc_task_handle){
+                    xTimerStop(xTimeHandle, 0);
                     vTaskDelete(adc_task_handle);
                     adc_task_handle = NULL;
                 }
@@ -689,7 +690,6 @@ static void tcp_client_recv_task(void *pvParameters){
 
         vTaskDelay(pdMS_TO_TICKS(100));
     }
-
 }
 
 void wifiClose(){
@@ -707,28 +707,40 @@ esp_err_t create_udp_client(){
     udp_remote_addr.sin_family = AF_INET;
     udp_remote_addr.sin_port = htons(UDP_SERVER_PORT);
     udp_remote_addr.sin_addr.s_addr = inet_addr(UDP_SERVER_IP);
-
+    ESP_LOGI(TAG, "udp addr: %lu!", udp_remote_addr.sin_addr.s_addr);
     return ESP_OK;
 }
 
-bool isIpValid(char *ipAddr) {
+bool isIpValid(const char *ip_server) {
+    char *ipAddr;
+    ipAddr = strdup(ip_server);
+    // char buff[512];
+    // ipAddr = strcpy(buff, ip_server);
     char *token;
     int num;
     int i = 0;
+    
+    ESP_LOGI(TAG, "ip valid before: %s!", ip_server);
     while ((token = strtok_r(ipAddr, ".", &ipAddr))) {
         i ++;
         num = atoi(token);
-        if (num < 0 || num > 255 || i > 4)
+        if (num < 0 || num > 255 || i > 4){
+            free(ipAddr);
             return false;
+        }
+            
     }
+    ESP_LOGI(TAG, "ip valid: %s!", ip_server);
+    free(ipAddr);
     return i == 4;
 }
 
 char* send_and_recv(){
-    unsigned int socklen = sizeof(udp_remote_addr);
+    char *ip_server;
+    socklen_t socklen = sizeof(udp_remote_addr);
     char sendBuff[512] = "Here is esp32s3.";
     const char *recvIp = "IP:";
-    char *ip_server;
+    
     while(true){
         int len = sendto(udp_sock, sendBuff, strlen(sendBuff), 0, (struct sockaddr *) &udp_remote_addr, sizeof(udp_remote_addr));
         if(len>0){
@@ -746,10 +758,142 @@ char* send_and_recv(){
             ESP_LOGI(TAG, "udp recv: %s\n", recvBuff);
             const char *tmp = recvBuff + strlen(recvIp);
             ip_server = strcpy(recvBuff, tmp);
-            ESP_LOGI(TAG, "ip server: %s\n", ip_server);
-            return ip_server;
+            ESP_LOGI(TAG, "ip tmp server: %s\n", tmp);
+            close(udp_sock);
+            // ip_server不对，
+            if(!isIpValid(ip_server)){
+                ESP_LOGE(TAG, "wrong ip!");
+                return ip_server;
+            }
         }
     }
+    return "";
+}
+
+int
+ip4addr_aton_test(const char *cp, ip4_addr_t *addr)
+{
+  u32_t val;
+  u8_t base;
+  char c;
+  u32_t parts[4];
+  u32_t *pp = parts;
+
+  c = *cp;
+  for (;;) {
+    /*
+     * Collect number up to ``.''.
+     * Values are specified as for C:
+     * 0x=hex, 0=octal, 1-9=decimal.
+     */
+    if (!lwip_isdigit(c)) {
+        ESP_LOGE(TAG, "digit");
+      return 0;
+    }
+    val = 0;
+    base = 10;
+    if (c == '0') {
+      c = *++cp;
+      if (c == 'x' || c == 'X') {
+        base = 16;
+        c = *++cp;
+      } else {
+        base = 8;
+      }
+    }
+    for (;;) {
+      if (lwip_isdigit(c)) {
+        if((base == 8) && ((u32_t)(c - '0') >= 8))
+          break;
+        val = (val * base) + (u32_t)(c - '0');
+        c = *++cp;
+      } else if (base == 16 && lwip_isxdigit(c)) {
+        val = (val << 4) | (u32_t)(c + 10 - (lwip_islower(c) ? 'a' : 'A'));
+        c = *++cp;
+      } else {
+        break;
+      }
+    }
+    if (c == '.') {
+      /*
+       * Internet format:
+       *  a.b.c.d
+       *  a.b.c   (with c treated as 16 bits)
+       *  a.b (with b treated as 24 bits)
+       */
+      if (pp >= parts + 3) {
+        ESP_LOGE(TAG, "pp");
+        return 0;
+      }
+      *pp++ = val;
+      c = *++cp;
+    } else {
+      break;
+    }
+  }
+  /*
+   * Check for trailing characters.
+   */
+  if (c != '\0' && !lwip_isspace(c)) {
+    ESP_LOGE(TAG, "trailing");
+    return 0;
+  }
+  /*
+   * Concoct the address according to
+   * the number of parts specified.
+   */
+  switch (pp - parts + 1) {
+
+    case 0:
+        ESP_LOGE(TAG, "nodigit");
+      return 0;       /* initial nondigit */
+
+    case 1:             /* a -- 32 bits */
+      break;
+
+    case 2:             /* a.b -- 8.24 bits */
+      if (val > 0xffffffUL) {
+        ESP_LOGE(TAG, "bit2");
+        return 0;
+      }
+      if (parts[0] > 0xff) {
+        ESP_LOGE(TAG, "bit2");
+        return 0;
+      }
+      val |= parts[0] << 24;
+      break;
+
+    case 3:             /* a.b.c -- 8.8.16 bits */
+      if (val > 0xffff) {
+        ESP_LOGE(TAG, "bit3");
+        return 0;
+      }
+      if ((parts[0] > 0xff) || (parts[1] > 0xff)) {
+        ESP_LOGE(TAG, "bit3");
+        return 0;
+      }
+      val |= (parts[0] << 24) | (parts[1] << 16);
+      break;
+
+    case 4:             /* a.b.c.d -- 8.8.8.8 bits */
+      if (val > 0xff) {
+        ESP_LOGE(TAG, "bit4");
+        return 0;
+      }
+      if ((parts[0] > 0xff) || (parts[1] > 0xff) || (parts[2] > 0xff)) {
+        ESP_LOGE(TAG, "bit4");
+        return 0;
+      }
+      val |= (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8);
+      break;
+    default:
+      LWIP_ASSERT("unhandled", 0);
+      break;
+  }
+  if (addr) {
+    ip4_addr_set_u32(addr, lwip_htonl(val));
+  }
+  return 1;
 }
 
 void app_main(void)
@@ -773,14 +917,13 @@ void app_main(void)
 
     create_udp_client();
     const char* ip_server = send_and_recv();
-    if(!isIpValid(ip_server)){
-        ESP_LOGE(TAG, "wrong ip!");
-        return;
-    }
-    tcpInit(ip_server);
+    ip4_addr_t val;
+    int res = ip4addr_aton_test(ip_server, &val);
+    ESP_LOGI(TAG, "res is: %d!", res);
+    // tcpInit("192.168.1.100");
     
-    xTimeHandle = xTimerCreate("adc_freq", pdMS_TO_TICKS(1000/100), pdTRUE, (void *)1, timeCallBackTask);
-    xTaskCreate(tcp_client_recv_task, "tcp_client_recv", 4096, NULL, 1, NULL);
+    // xTimeHandle = xTimerCreate("adc_freq", pdMS_TO_TICKS(1000/100), pdTRUE, (void *)1, timeCallBackTask);
+    // xTaskCreate(tcp_client_recv_task, "tcp_client_recv", 4096, NULL, 1, NULL);
 
     // 命令行控制jy901s的方法已被删去，可以去sdk中找到
     // vTaskStartScheduler();
@@ -847,3 +990,5 @@ static void AutoScanSensor(void){
 	ESP_LOGW(TAG, "can not find sensor\r\n");
 	ESP_LOGW(TAG, "please check your connection\r\n");
 }
+
+
