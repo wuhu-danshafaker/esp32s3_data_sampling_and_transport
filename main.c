@@ -1,4 +1,5 @@
 #include <stdio.h>
+// #include <sys/_timeval.h>
 #include "string.h"
 #include "wit_c_sdk.h"
 #include "driver/i2c.h"
@@ -478,7 +479,6 @@ static void adc_task(void *pvParameters){
             ESP_LOGI(TAG, "counter: %llu", end-start);
             start = end;
         }
-        // ESP_LOGI(TAG, "counter: %lu", packetCounter);
     }
 
     adc_oneshot_del_unit(adc1_handle);
@@ -586,10 +586,7 @@ static bool tcpInit(u32_t ip_int){
     struct sockaddr_in destaddr = {};
     destaddr.sin_family = AF_INET;
     destaddr.sin_port = htons(8080);
-    destaddr.sin_addr.s_addr = ip_int; //修改此addr影响另一个addr，why
-    // if (inet_pton(AF_INET, ip_server, &destaddr.sin_addr))
-    ESP_LOGI(TAG, "udp addr: %lu! %lu", udp_remote_addr.sin_addr.s_addr, );
-    ESP_LOGI(TAG, "tcp addr: %lu!", destaddr.sin_addr.s_addr);
+    destaddr.sin_addr.s_addr = ip_int; //修改此addr影响另一个addr inet函数也有问题
     socklen_t len = sizeof(struct sockaddr);
     if (connect(sock, (struct sockaddr *)&destaddr, len) < 0){
         ESP_LOGE(TAG, "connect to server failed!");
@@ -666,23 +663,21 @@ static void tcp_client_recv_task(void *pvParameters){
             else if (strncmp(recv_msg, pause_record, len) == 0){
                 ESP_LOGI(TAG, "Tasks paused");
                 if(tcp_send_handle){
-                    vTaskDelete(tcp_send_handle);
-                    tcp_send_handle = NULL;
+                    vTaskSuspend(tcp_send_handle);
                 }
                 if(adc_task_handle){
-                    vTaskDelete(adc_task_handle);
-                    adc_task_handle = NULL;
+                    xTimerStop(xTimeHandle, 0);
+                    vTaskSuspend(adc_task_handle);
                 }
             }
             else if (strncmp(recv_msg, resume_record, len) == 0){
                 ESP_LOGI(TAG, "Tasks resumed");
                 if(tcp_send_handle){
-                    vTaskDelete(tcp_send_handle);
-                    tcp_send_handle = NULL;
+                    vTaskResume(tcp_send_handle);
                 }
                 if(adc_task_handle){
-                    vTaskDelete(adc_task_handle);
-                    adc_task_handle = NULL;
+                    xTimerStart(xTimeHandle, 0);
+                    vTaskResume(adc_task_handle);
                 }
             }
         }
@@ -707,6 +702,14 @@ esp_err_t create_udp_client(){
     udp_remote_addr.sin_port = htons(UDP_SERVER_PORT);
     udp_remote_addr.sin_addr.s_addr = inet_addr(UDP_SERVER_IP);
     ESP_LOGI(TAG, "udp addr: %lu!", udp_remote_addr.sin_addr.s_addr);
+
+    struct timeval tv = {5, 0};
+    int ret = setsockopt(udp_sock, SOL_SOCKET, SO_RCVTIMEO, (char*) &tv, sizeof(tv));
+    if(ret){
+        ESP_LOGE(TAG, "Set socket opt failed.");
+        closesocket(udp_sock);
+        return ESP_FAIL;
+    }
     return ESP_OK;
 }
 
@@ -761,11 +764,14 @@ char* send_and_recv(){
             // ip_server不对，
             if(!isIpValid(ip_server)){
                 ESP_LOGE(TAG, "wrong ip!");
+                close(udp_sock);
                 return "";
             } else{
                 close(udp_sock);
                 return ip_server;
             }
+        } else if (recv_len<=0){
+            ESP_LOGE(TAG, "recvfrom failed");
         }
     }
     return "";
