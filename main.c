@@ -41,26 +41,19 @@
 #define UDP_SERVER_IP "255.255.255.255"
 #define UDP_SERVER_PORT 8265
 
-#define ADC_CONV_DONE      BIT0
-#define EXAMPLE_ADC_UNIT                    ADC_UNIT_1
-#define _EXAMPLE_ADC_UNIT_STR(unit)         #unit
-#define EXAMPLE_ADC_UNIT_STR(unit)          _EXAMPLE_ADC_UNIT_STR(unit)
-#define EXAMPLE_ADC_CONV_MODE               ADC_CONV_SINGLE_UNIT_1
-#define EXAMPLE_ADC_ATTEN                   ADC_ATTEN_DB_11
-
+#define ADC_ATTEN_3100mV        ADC_ATTEN_DB_11
+// #define ADC_ATTEN_1750mV        ADC_ATTEN_DB_6
 #define ADC1_CHAN1_NTC          ADC_CHANNEL_0
 #define ADC1_CHAN1_FSR          ADC_CHANNEL_1
+#define ADC1_CHAN1_VCC          ADC_CHANNEL_8
 
-#define EXAMPLE_ADC_OUTPUT_TYPE             ADC_DIGI_OUTPUT_FORMAT_TYPE2
-#define EXAMPLE_ADC_GET_CHANNEL(p_data)     ((p_data)->type2.channel)
-#define EXAMPLE_ADC_GET_DATA(p_data)        ((p_data)->type2.data)
-#define EXAMPLE_READ_LEN                    64
 #define MAX_SIZE_BUF 512
 
-#define GPIO_FSRMUX_EN GPIO_NUM_12
-#define GPIO_FSRMUX_S0 GPIO_NUM_9
-#define GPIO_FSRMUX_S1 GPIO_NUM_10
-#define GPIO_FSRMUX_S2 GPIO_NUM_11
+// DAQ board v2.1
+#define GPIO_FSRMUX_EN GPIO_NUM_21
+#define GPIO_FSRMUX_S0 GPIO_NUM_10
+#define GPIO_FSRMUX_S1 GPIO_NUM_11
+#define GPIO_FSRMUX_S2 GPIO_NUM_12
 #define GPIO_FSRPIN_SEL ((1ULL << GPIO_FSRMUX_EN)|(1ULL << GPIO_FSRMUX_S0)|(1ULL << GPIO_FSRMUX_S1)|(1ULL << GPIO_FSRMUX_S2))
 
 #define GPIO_NTCMUX_EN GPIO_NUM_4
@@ -109,6 +102,7 @@ static int s_retry_num = 0;
 static int sock;
 static int udp_sock;
 
+static byte ip_esp32s3[4];
 static struct sockaddr_in udp_remote_addr;
 // static char *ip_server;
 
@@ -117,6 +111,7 @@ uint32_t packetCounter;
 static adc_oneshot_unit_handle_t adc1_handle;
 static adc_cali_handle_t adc1_cali_chan0_handle = NULL;
 static adc_cali_handle_t adc1_cali_chan1_handle = NULL;
+static adc_cali_handle_t adc1_cali_chan8_handle = NULL;
 
 static gpio_config_t io_cfg = {};
 
@@ -282,17 +277,24 @@ static void adc_init(){
     adc_oneshot_new_unit(&init_config1, &adc1_handle);
     adc_oneshot_chan_cfg_t config = {
         .bitwidth = ADC_BITWIDTH_DEFAULT,
-        .atten = EXAMPLE_ADC_ATTEN,
+        .atten = ADC_ATTEN_3100mV,
     };
-    adc_oneshot_config_channel(adc1_handle, ADC1_CHAN1_NTC, &config);
-    adc_oneshot_config_channel(adc1_handle, ADC1_CHAN1_FSR, &config);
 
-    if (adc_cali_init(ADC_UNIT_1, ADC1_CHAN1_NTC, EXAMPLE_ADC_ATTEN, &adc1_cali_chan0_handle)){
-        ESP_LOGI(TAG, "CHAN0 calibrated!");
+    adc_oneshot_config_channel(adc1_handle, ADC1_CHAN1_FSR, &config);
+    adc_oneshot_config_channel(adc1_handle, ADC1_CHAN1_NTC, &config);
+    adc_oneshot_config_channel(adc1_handle, ADC1_CHAN1_VCC, &config);
+
+    if (adc_cali_init(ADC_UNIT_1, ADC1_CHAN1_FSR, ADC_ATTEN_3100mV, &adc1_cali_chan1_handle)){
+        ESP_LOGI(TAG, "FSR ADC calibrated!");
     }
-    if (adc_cali_init(ADC_UNIT_1, ADC1_CHAN1_FSR, EXAMPLE_ADC_ATTEN, &adc1_cali_chan1_handle)){
-        ESP_LOGI(TAG, "CHAN1 calibrated!");
+    if (adc_cali_init(ADC_UNIT_1, ADC1_CHAN1_NTC, ADC_ATTEN_3100mV, &adc1_cali_chan0_handle)){
+        ESP_LOGI(TAG, "NTC ADC calibrated!");
     }
+    if (adc_cali_init(ADC_UNIT_1, ADC1_CHAN1_VCC, ADC_ATTEN_3100mV, &adc1_cali_chan8_handle)){
+        ESP_LOGI(TAG, "VCC ADC calibrated!");
+    }
+
+    
 }
 
 static void witJy901sInit(){
@@ -389,11 +391,11 @@ static void adc_task(void *pvParameters){
     // read adc & i2c
     esp_err_t ret = 0;
     uint32_t ret_num;
-    int adc_num = 12; // 8fsr 4ntc
+    int adc_num = 13; // 8fsr 4ntc 1vcc
     int adc_byte = adc_num * 2;
-    // 
-    int adc_raw[12] = {0};
-    int voltage[12] = {0};
+    // 8 fsr + 4 ntc + 1 vcc
+    int adc_raw[13] = {0};
+    int voltage[13] = {0};
 
     xheader.header_len = 2;
     // 打入header 2byte
@@ -405,7 +407,9 @@ static void adc_task(void *pvParameters){
     double dimu_AGE[9];
     int imu_byte = 72; //9*8byte
 
-    ret_num = 6 + adc_byte + imu_byte;
+    int ip_byte = 4;
+
+    ret_num = 6 + adc_byte + imu_byte + ip_byte; // 108 byte
     byte result[ret_num];
     memset(result, 0xcc, ret_num);
 
@@ -417,21 +421,26 @@ static void adc_task(void *pvParameters){
     start = esp_timer_get_time();
     while (1) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        // 包头
         memcpy(result, xheader.header, 2);
         intTo4Byte(packetCounterByte, packetCounter);
-        memcpy(&(result[2]), packetCounterByte, 4);
+        memcpy(&result[2], packetCounterByte, 4); 
+        // 包尾
+        memcpy(&result[6 + adc_byte + imu_byte], ip_esp32s3, ip_byte);
 
+        ret = adc_oneshot_read(adc1_handle, ADC1_CHAN1_VCC, &adc_raw[0]);
         for(int i=0;i<8;i++){
             fsr_sel(i);
-            ret = ret + adc_oneshot_read(adc1_handle, ADC1_CHAN1_FSR, &adc_raw[i]);
+            ret = ret + adc_oneshot_read(adc1_handle, ADC1_CHAN1_FSR, &adc_raw[i+1]);
             // ESP_LOGI(TAG, "ADC%d Channel[%d] Raw Data: %d", ADC_UNIT_1 + 1, ADC1_CHAN1_FSR, adc_raw[i]);
         }
 
         for(int i=0;i<4;i++){
             ntc_sel(i);
-            ret = ret + adc_oneshot_read(adc1_handle, ADC1_CHAN1_NTC, &adc_raw[i+8]);
+            ret = ret + adc_oneshot_read(adc1_handle, ADC1_CHAN1_NTC, &adc_raw[i+9]);
             // ESP_LOGI(TAG, "ADC%d Channel[%d] Raw Data: %d", ADC_UNIT_1 + 1, ADC1_CHAN1_FSR, adc_raw[0]);
         }
+        
 
         WitReadReg(AX, 13);
         if(s_cDataUpdate){
@@ -453,17 +462,24 @@ static void adc_task(void *pvParameters){
 				s_cDataUpdate &= ~ANGLE_UPDATE;
 			}
             doubleArrayToByte(&result[6+adc_byte], dimu_AGE, 9);
+        } else{
+            for(int i=0;i<9;i++){
+                dimu_AGE[i] = 0.0;
+            }
+            doubleArrayToByte(&result[6+adc_byte], dimu_AGE, 9);
         }
         if (ret == ESP_OK){
+            adc_cali_raw_to_voltage(adc1_cali_chan8_handle, adc_raw[0], &voltage[0]);
             for(int i=0;i<8;i++){
-                adc_cali_raw_to_voltage(adc1_cali_chan1_handle, adc_raw[i], &voltage[i]);
+                adc_cali_raw_to_voltage(adc1_cali_chan1_handle, adc_raw[i+1], &voltage[i+1]);
                 // ESP_LOGI(TAG, "ADC%d Channel[%d] Vol[%d] Data: %d", ADC_UNIT_1 + 1, ADC1_CHAN1_FSR, i, voltage[i]);
             }
-            for(int i=8;i<12;i++){
-                adc_cali_raw_to_voltage(adc1_cali_chan0_handle, adc_raw[i], &voltage[i]);
+            for(int i=0;i<4;i++){
+                adc_cali_raw_to_voltage(adc1_cali_chan0_handle, adc_raw[i+9], &voltage[i+9]);
                 // ESP_LOGI(TAG, "ADC%d Channel[%d] Vol[%d] Data: %d", ADC_UNIT_1 + 1, ADC1_CHAN1_NTC, i, voltage[i]);
             }
-            adc_vol_to_bytes(&result[6], adc_byte, voltage, 12);
+            
+            adc_vol_to_bytes(&result[6], adc_byte, voltage, 13);
 
             memcpy(pucMessage->uc_data, result, ret_num);
             pucMessage->data_len = ret_num;
@@ -484,6 +500,7 @@ static void adc_task(void *pvParameters){
     adc_oneshot_del_unit(adc1_handle);
     adc_cali_deinit(adc1_cali_chan0_handle);
     adc_cali_deinit(adc1_cali_chan1_handle);
+    adc_cali_deinit(adc1_cali_chan8_handle);
 };
 
 static void gpio_init(){
@@ -518,6 +535,9 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
+        
+        const char *ip_str = inet_ntoa(event->ip_info.ip);
+        inet_pton(AF_INET, ip_str, ip_esp32s3);
         s_retry_num = 0;
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     }
@@ -672,6 +692,8 @@ static void tcp_client_recv_task(void *pvParameters){
             }
             else if (strncmp(recv_msg, resume_record, len) == 0){
                 ESP_LOGI(TAG, "Tasks resumed");
+                packetCounter = 0;
+                xQueueReset(xqueue_estimate);
                 if(tcp_send_handle){
                     vTaskResume(tcp_send_handle);
                 }
